@@ -211,7 +211,7 @@ def breadcrumb(page_name):
 # --------------------------------------------------------------------------
 @st.cache_data
 def load_csv(path):
-    return pd.read_csv(path)
+  return pd.read_csv(os.path.basename(path))
 
 
 def classify_fr_nfr(text: str) -> str:
