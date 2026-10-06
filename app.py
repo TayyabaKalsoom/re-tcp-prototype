@@ -38,25 +38,25 @@ NFR_KEYWORDS = [
 DATASETS = {
     "DS1 \u2014 PROMISE (Public Benchmark)": {
         "key": "ds1", "has_tc": True,
-        "req_csv": "data/ds1_requirements.csv", "tc_csv": "data/ds1_test_cases.csv",
+        "req_csv": "ds1_requirements.csv", "tc_csv": "ds1_test_cases.csv",
         "source": "PROMISE NFR Repository", "origin": "Public",
         "note": "625 requirements; 10 LLM-generated test cases (stratified RFR subset)",
     },
     "DS2 \u2014 RETRO.NET (Public Benchmark)": {
         "key": "ds2", "has_tc": False,
-        "req_csv": "data/ds2_requirements.csv", "tc_csv": None,
+        "req_csv": "ds2_requirements.csv", "tc_csv": None,
         "source": "RETRO.NET Requirements Traceability Tool", "origin": "Public",
         "note": "14 requirements (stratified sample) \u2014 classification & prioritization only, no paired test cases",
     },
     "DS3 \u2014 EPCS Integration (Industrial, real)": {
         "key": "ds3", "has_tc": True,
-        "req_csv": "data/ds3_requirements.csv", "tc_csv": "data/ds3_test_cases.csv",
+        "req_csv": "ds3_requirements.csv", "tc_csv": "ds3_test_cases.csv",
         "source": "Drummond Group EPCS audit procedure", "origin": "Industrial (anonymized)",
         "note": "12 requirements, real paired test cases",
     },
     "DS4 \u2014 Manifests Web (Industrial, significant result)": {
         "key": "ds4", "has_tc": True,
-        "req_csv": "data/ds4_requirements.csv", "tc_csv": "data/ds4_test_cases.csv",
+        "req_csv": "ds4_requirements.csv", "tc_csv": "ds4_test_cases.csv",
         "source": "Internal product specification", "origin": "Industrial (anonymized)",
         "note": "14 requirements \u2014 APFD improvement statistically significant (p=0.029)",
     },
@@ -267,7 +267,7 @@ if "page" not in st.session_state:
     st.session_state.page = PAGES[0]
 
 with st.sidebar:
-    logo_path = os.path.join(os.path.dirname(__file__), "assets", "prioritization_icon.png")
+    logo_path = os.path.join(os.path.dirname(__file__),, "prioritization_icon.png")
     lcol1, lcol2, lcol3 = st.columns([1, 2, 1])
     with lcol2:
         if os.path.exists(logo_path):
@@ -310,7 +310,7 @@ if page == "Dashboard":
     breadcrumb("Dashboard")
     logo_col, title_col = st.columns([1, 8])
     with logo_col:
-        proc_logo_path = os.path.join(os.path.dirname(__file__), "assets", "prioritization_icon.png")
+        proc_logo_path = os.path.join(os.path.dirname(__file__),, "prioritization_icon.png")
         if os.path.exists(proc_logo_path):
             st.image(proc_logo_path, width=150)
     with title_col:
@@ -360,7 +360,7 @@ if page == "Dashboard":
                     f"\u2190 Selector is in the sidebar</div>", unsafe_allow_html=True)
 
     st.markdown("<h3>The Full Pipeline \u2014 All 3 Phases</h3>", unsafe_allow_html=True)
-    pipeline_img_path = os.path.join(os.path.dirname(__file__), "assets", "combined_pipeline.png")
+    pipeline_img_path = os.path.join(os.path.dirname(__file__),, "combined_pipeline.png")
     if os.path.exists(pipeline_img_path):
         st.image(pipeline_img_path, use_container_width=True)
 
