@@ -1,0 +1,13 @@
+tc_id,description,linked_req_id
+TC_EPCS_001,Verify non-EPCS user cannot sign controlled substance prescription,REQ-01
+TC_EPCS_002,Verify identity proofing completes successfully for a test prescriber,REQ-03
+TC_EPCS_003,Verify two-factor authentication credential activation,REQ-04
+TC_EPCS_004,Verify dual authorization is required to grant EPCS role,REQ-05
+TC_EPCS_005,Create Adderall prescription as authorized EPCS user,REQ-06
+TC_EPCS_006,Review prescription page displays all mandatory patient/prescriber/drug info,REQ-07
+TC_EPCS_007,Mark reviewed prescription as Ready to Sign,REQ-08
+TC_EPCS_008,Attempt signing with invalid two-factor authentication,REQ-09
+TC_EPCS_009,Sign prescription using valid two-factor authentication,REQ-10
+TC_EPCS_010,Verify signed Adderall prescription appears in controlled substance report,REQ-11
+TC_EPCS_011,Verify audit trail records create/ready/sign/transmit events,REQ-12
+TC_EPCS_012,Verify security incident report captures failed 2FA and prescriber setup,REQ-05

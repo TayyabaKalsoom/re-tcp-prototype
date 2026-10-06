@@ -1,0 +1,11 @@
+tc_id,description,linked_req_id
+TC_DS1_059,Verify a business rule violating a regulatory guideline is flagged before dispute processing.,REQ-059
+TC_DS1_091,Verify an adjuster can request a recycled-parts audit from an estimate.,REQ-091
+TC_DS1_281,Verify successful connection and data read/write against each supported DBMS.,REQ-281
+TC_DS1_260,Verify all four address fields are captured and persisted for a vehicle location.,REQ-260
+TC_DS1_009,Conduct a heuristic UI review against the organization's style guide.,REQ-009
+TC_DS1_038,"Verify download produces a complete, correctly formatted export file.",REQ-038
+TC_DS1_010,Audit color and font usage across all screens.,REQ-010
+TC_DS1_077,Submit search criteria and verify the top-rated matching facility is returned first.,REQ-077
+TC_DS1_014,Review UI copy against a realtor-domain glossary.,REQ-014
+TC_DS1_036,Submit an MLS query and verify results returned.,REQ-036

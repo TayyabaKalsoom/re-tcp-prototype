@@ -1,0 +1,13 @@
+tc_id,description,linked_req_id
+TC001,"Create manifest by selecting origin and trailer, save",R1
+TC002,Leave Origin blank and save - verify validation shown,R1
+TC003,Add item and quantity to manifest in Building state,R5
+TC004,Remove item from manifest in Building state,R6
+TC005,Mark Building manifest as Ready,R7
+TC006,Edit quantity on Ready manifest - verify revert to Building,R8
+TC007,Driver enters destination and accepts Ready manifest,R9
+TC008,Receiver updates quantities and marks manifest Received,R10
+TC009,Attempt to edit a Received manifest - verify blocked,R11
+TC010,Search locations/trailers/items on Create page,R12
+TC011,Disconnect network and save manifest - verify retry message,R13
+TC012,"Rapidly click increment button - verify correct quantity, no lag",R14

@@ -1,0 +1,15 @@
+req_id,requirement_text,stakeholder_priority,change_frequency,historical_defects
+REQ-01,The system shall allow the user to create a new project by providing the project name.,3,2,0
+REQ-02,The system shall allow the user to provide the low-level document path when creating a new project.,3,2,0
+REQ-03,The user shall be able to cancel the new project creation process and return to the previous state at any time.,2,1,0
+REQ-04,The system shall create the project in Trace mode using the provided input.,3,2,1
+REQ-05,The user shall be able to select a project name from a list of saved projects to load.,3,1,0
+REQ-06,The user shall be able to activate the Save function to save the current project data and status.,4,2,1
+REQ-07,The user shall be able to generate and save an RTM report.,4,2,1
+REQ-08,The user shall be able to activate a Kill Hidden Links function to remove elements not currently displayed.,2,1,0
+REQ-09,The system shall allow multiple projects to be open at the same time.,3,2,2
+REQ-10,The user shall be able to create and remove links between low-level and high-level requirements.,5,3,2
+REQ-11,The system shall display the list of candidate links based on tracing and permit feedback and filtering.,4,2,1
+REQ-12,The system shall mark the project as completed and not permit further changes once tracing is finished.,3,1,1
+REQ-13,The system shall display to the user the percentage level of satisfaction for each link.,4,2,1
+REQ-14,The system shall color-code the satisfaction status of each candidate link.,3,1,0

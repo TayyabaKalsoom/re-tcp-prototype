@@ -1,0 +1,13 @@
+req_id,requirement_text,stakeholder_priority,change_frequency,historical_defects
+REQ-01,The system shall prevent a user without EPCS permission from signing a controlled substance prescription.,5,2,3
+REQ-02,The system shall block a controlled substance prescription from being marked ready-to-sign or signed by an unauthorized user.,5,2,3
+REQ-03,The system shall support identity proofing of a practitioner prior to granting e-prescribing credentials.,4,1,1
+REQ-04,The system shall support linking and activation of a two-factor authentication credential for a practitioner.,5,2,2
+REQ-05,"The system shall require dual authorization, including practitioner two-factor authentication, before granting EPCS permissions to a user account.",5,1,2
+REQ-06,The system shall allow an authorized user to create a controlled substance prescription.,3,3,1
+REQ-07,"The system shall display patient, prescriber, and drug details on the prescription review screen before signing.",4,2,1
+REQ-08,The system shall require a controlled substance prescription to be reviewed and marked ready-to-sign before it can be signed or transmitted.,5,1,2
+REQ-09,The system shall reject prescription signing attempts that use invalid two-factor authentication.,5,1,3
+REQ-10,The system shall allow prescription signing when valid two-factor authentication is provided.,5,1,1
+REQ-11,The system shall maintain a sortable report of all controlled substance prescriptions.,3,2,0
+REQ-12,"The system shall maintain an audit trail capturing creation, readiness, signing, and transmission events for controlled substance prescriptions.",4,1,1
