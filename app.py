@@ -267,7 +267,7 @@ if "page" not in st.session_state:
     st.session_state.page = PAGES[0]
 
 with st.sidebar:
-    logo_path = os.path.join(os.path.dirname(__file__),, "prioritization_icon.png")
+    logo_path = os.path.join(os.path.dirname(__file__), "prioritization_icon.png")
     lcol1, lcol2, lcol3 = st.columns([1, 2, 1])
     with lcol2:
         if os.path.exists(logo_path):
@@ -310,7 +310,7 @@ if page == "Dashboard":
     breadcrumb("Dashboard")
     logo_col, title_col = st.columns([1, 8])
     with logo_col:
-        proc_logo_path = os.path.join(os.path.dirname(__file__),, "prioritization_icon.png")
+        proc_logo_path = os.path.join(os.path.dirname(__file__), "prioritization_icon.png")
         if os.path.exists(proc_logo_path):
             st.image(proc_logo_path, width=150)
     with title_col:
@@ -360,7 +360,7 @@ if page == "Dashboard":
                     f"\u2190 Selector is in the sidebar</div>", unsafe_allow_html=True)
 
     st.markdown("<h3>The Full Pipeline \u2014 All 3 Phases</h3>", unsafe_allow_html=True)
-    pipeline_img_path = os.path.join(os.path.dirname(__file__),, "combined_pipeline.png")
+    pipeline_img_path = os.path.join(os.path.dirname(__file__), "combined_pipeline.png")
     if os.path.exists(pipeline_img_path):
         st.image(pipeline_img_path, use_container_width=True)
 
