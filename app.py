@@ -907,7 +907,9 @@ elif page == "Phase 1 \u2014 Requirement Prioritization":
 
     if "aspect" not in reqs.columns:
         reqs["aspect"] = reqs["requirement_text"].apply(classify_aspect)
-    reqs.loc[reqs["fr_nfr"] == "FR", "aspect"] = "Functional"
+    # The quality aspect (ISO/IEC 25010 keywords) is kept as an independent signal: a requirement the
+    # centroid rule labels FR can still carry a Security/Performance/... aspect. Only an NFR with no
+    # keyword aspect is relabelled, so it does not read as "Functional".
     reqs.loc[(reqs["fr_nfr"] == "NFR") & (reqs["aspect"] == "Functional"), "aspect"] = "NFR (general)"
 
     class_cols = ["req_id", "requirement_text", "fr_nfr", "aspect", "topic", "sim_FR", "sim_NFR"]
@@ -925,13 +927,18 @@ elif page == "Phase 1 \u2014 Requirement Prioritization":
     kc3.metric("NFR", int((reqs["fr_nfr"] == "NFR").sum()))
     kc4.metric("Topics discovered", n_topics)
 
-    aspect_counts = reqs["aspect"].value_counts().reset_index()
-    aspect_counts.columns = ["Aspect", "Requirements"]
-    fig_aspect = px.bar(aspect_counts, x="Requirements", y="Aspect", orientation="h", color="Aspect",
-                        color_discrete_sequence=BRAND, title="Requirements by Aspect (FR + NFR quality aspects)")
-    fig_aspect.update_layout(showlegend=False, height=max(220, 60 * len(aspect_counts)),
+    aspect_counts = reqs.groupby(["aspect", "fr_nfr"]).size().reset_index(name="Requirements")
+    aspect_counts.columns = ["Aspect", "FR/NFR (centroid rule)", "Requirements"]
+    fig_aspect = px.bar(aspect_counts, x="Requirements", y="Aspect", orientation="h",
+                        color="FR/NFR (centroid rule)", color_discrete_map={"FR": ORANGE, "NFR": NAVY},
+                        title="Quality aspect (keywords) vs. FR/NFR label (centroid rule)")
+    fig_aspect.update_layout(barmode="stack", height=max(240, 60 * aspect_counts["Aspect"].nunique()),
                              yaxis={"categoryorder": "total ascending"})
     st.plotly_chart(fig_aspect, use_container_width=True)
+    st.caption("Two independent signals: the bar's row is the quality aspect detected from ISO/IEC 25010 keywords; "
+               "its colour is the FR/NFR label from the LDA nearest-centroid rule. An orange segment on a quality "
+               "aspect (e.g. Security) is a requirement the centroid rule called FR although its wording names a "
+               "quality concern — the cases where the two signals disagree.")
 
     st.subheader("3. Cosine Similarity (FR/NFR Centroid Alignment)")
     st.caption("Matches the manuscript's actual classification mechanism: each requirement's LDA topic-proportion "
