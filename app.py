@@ -18,7 +18,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from sklearn.decomposition import LatentDirichletAllocation, PCA
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import pairwise_distances
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -231,6 +232,84 @@ def load_csv(path):
 def classify_fr_nfr(text: str) -> str:
     t = text.lower()
     return "NFR" if any(k in t for k in NFR_KEYWORDS) else "FR"
+
+
+# --------------------------------------------------------------------------
+# FR/NFR classification: LDA topic vectors + nearest-centroid cosine rule
+# (manuscript Section 3.1.1, Eq. 1-2). Semi-supervised: the LDA model needs
+# no labels, but the FR and NFR centroids are the mean topic vectors of the
+# labelled DS1 (PROMISE) calibration requirements. Every other dataset,
+# including an uploaded one, is mapped into that fixed topic space (fold-in).
+# --------------------------------------------------------------------------
+CALIBRATION_KEY = "ds1"
+
+
+def _fit_lda(texts, n_topics):
+    vec = CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=2)
+    X = vec.fit_transform(texts)
+    lda = LatentDirichletAllocation(n_components=n_topics, random_state=42, max_iter=30,
+                                    learning_method="batch")
+    lda.fit(X)
+    return vec, lda, lda.transform(X)
+
+
+def _class_centroids(theta, labels):
+    labels = np.asarray(labels)
+    return theta[labels == "FR"].mean(axis=0), theta[labels == "NFR"].mean(axis=0)
+
+
+def _cos_to(theta, c):
+    num = theta @ c
+    den = np.linalg.norm(theta, axis=1) * np.linalg.norm(c)
+    return np.divide(num, den, out=np.zeros_like(num, dtype=float), where=den > 0)
+
+
+def centroid_rule(theta, c_fr, c_nfr):
+    """Eq. (2): label = argmax over {FR, NFR} of CosSim(theta, centroid)."""
+    s_fr, s_nfr = _cos_to(theta, c_fr), _cos_to(theta, c_nfr)
+    return np.where(s_nfr > s_fr, "NFR", "FR"), s_fr, s_nfr
+
+
+def _calibration_df():
+    cal = next(d for d in DATASETS.values() if d["key"] == CALIBRATION_KEY)
+    df = load_csv(cal["req_csv"])
+    return df[df["fr_nfr_given"].isin(["FR", "NFR"])].reset_index(drop=True)
+
+
+@st.cache_resource(show_spinner="Fitting the DS1 calibration model (LDA + FR/NFR centroids)...")
+def calibration_model(n_topics):
+    df = _calibration_df()
+    vec, lda, theta = _fit_lda(df["requirement_text"].astype(str).tolist(), n_topics)
+    c_fr, c_nfr = _class_centroids(theta, df["fr_nfr_given"].values)
+    return {"vec": vec, "lda": lda, "c_fr": c_fr, "c_nfr": c_nfr,
+            "n_fr": int((df["fr_nfr_given"] == "FR").sum()), "n_nfr": int((df["fr_nfr_given"] == "NFR").sum())}
+
+
+@st.cache_data(show_spinner="Classifying DS1 on held-out folds...")
+def ds1_held_out_classification(n_topics, n_splits=5):
+    """DS1 is the calibration set, so each requirement is classified by a model (LDA + centroids)
+    fitted on the other folds only, never on itself."""
+    df = _calibration_df()
+    texts = df["requirement_text"].astype(str).tolist()
+    labels = df["fr_nfr_given"].values
+    pred = np.empty(len(df), dtype=object)
+    s_fr = np.zeros(len(df))
+    s_nfr = np.zeros(len(df))
+    for tr, te in StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42).split(texts, labels):
+        vec, lda, th_tr = _fit_lda([texts[i] for i in tr], n_topics)
+        c_fr, c_nfr = _class_centroids(th_tr, labels[tr])
+        lab, a, b = centroid_rule(lda.transform(vec.transform([texts[i] for i in te])), c_fr, c_nfr)
+        pred[te], s_fr[te], s_nfr[te] = lab, a, b
+    return pd.DataFrame({"req_id": df["req_id"].values, "fr_nfr": pred, "sim_FR": s_fr, "sim_NFR": s_nfr,
+                         "ground_truth": labels})
+
+
+def vocabulary_coverage(vec, texts):
+    """Share of (unigram, stop-word-free) tokens that exist in the calibration vocabulary."""
+    analyzer = CountVectorizer(stop_words="english").build_analyzer()
+    vocab = {t for t in vec.vocabulary_ if " " not in t}
+    toks = [t for txt in texts for t in analyzer(str(txt))]
+    return (sum(t in vocab for t in toks) / len(toks)) if toks else 0.0
 
 
 def normalize(series: pd.Series) -> pd.Series:
@@ -794,32 +873,49 @@ elif page == "Phase 1 \u2014 Requirement Prioritization":
     st.subheader("2. Requirement Classification (Topic Modeling)")
     n_topics = st.slider("Number of topics (K)", 2, 6, 3, key="n_topics")
 
-    vec = TfidfVectorizer(stop_words="english", max_features=400)
-    X = vec.fit_transform(reqs_raw["requirement_text"])
-
-    lda = LatentDirichletAllocation(n_components=n_topics, random_state=42, max_iter=30)
-    topic_dist = lda.fit_transform(X)
+    # Fixed calibration model (fitted on labelled DS1); this dataset is folded into its topic space.
+    model = calibration_model(n_topics)
+    texts = reqs_raw["requirement_text"].astype(str).tolist()
+    topic_dist = model["lda"].transform(model["vec"].transform(texts))
     reqs = reqs_raw.copy()
     reqs["topic"] = topic_dist.argmax(axis=1)
 
-    if UPLOAD_MODE:
-        reqs["fr_nfr"] = reqs["fr_nfr_given"]
-        st.caption("FR/NFR labels and quality aspects are assigned by the aspect-based classifier "
-                   "(ISO/IEC 25010 quality characteristics: Security, Reliability, Performance, Usability, ...). "
-                   "A requirement with no quality aspect is a Functional Requirement (FR).")
-    elif "fr_nfr_given" in reqs.columns and reqs["fr_nfr_given"].notna().all():
-        reqs["fr_nfr"] = reqs["fr_nfr_given"]
-        st.caption("FR/NFR labels shown are the dataset's original ground-truth labels (not the heuristic classifier).")
+    is_calibration_ds = (not UPLOAD_MODE) and cfg["key"] == CALIBRATION_KEY
+    if is_calibration_ds:
+        held_out = ds1_held_out_classification(n_topics).drop_duplicates("req_id").set_index("req_id")
+        for col in ["fr_nfr", "sim_FR", "sim_NFR"]:
+            reqs[col] = reqs["req_id"].map(held_out[col])
+        truth = reqs["fr_nfr_given"]
+        acc = float((reqs["fr_nfr"] == truth).mean())
+        baseline = float(truth.value_counts(normalize=True).max())
+        st.caption("FR/NFR labels come from the LDA nearest-centroid rule (Eq. 1–2). DS1 is the labelled "
+                   "calibration set, so each requirement is classified by a model whose LDA and centroids were "
+                   "fitted on the other four folds only (stratified 5-fold).")
+        a1, a2 = st.columns(2)
+        a1.metric("Agreement with ground-truth labels", f"{acc:.1%}")
+        a2.metric("Majority-class baseline", f"{baseline:.1%}")
     else:
-        reqs["fr_nfr"] = reqs["requirement_text"].apply(classify_fr_nfr)
+        labels, s_fr, s_nfr = centroid_rule(topic_dist, model["c_fr"], model["c_nfr"])
+        reqs["fr_nfr"], reqs["sim_FR"], reqs["sim_NFR"] = labels, s_fr, s_nfr
+        cov = vocabulary_coverage(model["vec"], texts)
+        st.caption("FR/NFR labels come from the LDA nearest-centroid rule (Eq. 1–2): each requirement's "
+                   "topic vector is compared by cosine similarity with the FR and NFR centroids learned from the "
+                   f"labelled DS1 (PROMISE) calibration set ({model['n_fr']} FR, {model['n_nfr']} NFR), and the "
+                   f"closer centroid gives the label. {cov:.0%} of this dataset's words are in the calibration "
+                   "vocabulary; unknown words are ignored. The quality aspect (Security, Performance, ...) is "
+                   "detected separately from ISO/IEC 25010 keywords.")
 
     if "aspect" not in reqs.columns:
         reqs["aspect"] = reqs["requirement_text"].apply(classify_aspect)
     reqs.loc[reqs["fr_nfr"] == "FR", "aspect"] = "Functional"
     reqs.loc[(reqs["fr_nfr"] == "NFR") & (reqs["aspect"] == "Functional"), "aspect"] = "NFR (general)"
 
+    class_cols = ["req_id", "requirement_text", "fr_nfr", "aspect", "topic", "sim_FR", "sim_NFR"]
+    if is_calibration_ds:
+        class_cols.insert(3, "fr_nfr_given")
     st.dataframe(
-        reqs[["req_id", "requirement_text", "fr_nfr", "aspect", "topic"]],
+        reqs[class_cols].rename(columns={"fr_nfr_given": "ground_truth"})
+        .style.format({"sim_FR": "{:.3f}", "sim_NFR": "{:.3f}"}),
         use_container_width=True, hide_index=True, height=260,
     )
 
@@ -840,57 +936,39 @@ elif page == "Phase 1 \u2014 Requirement Prioritization":
     st.subheader("3. Cosine Similarity (FR/NFR Centroid Alignment)")
     st.caption("Matches the manuscript's actual classification mechanism: each requirement's LDA topic-proportion "
                "vector is compared via cosine similarity to two centroids \u2014 the mean topic vector of the FR class "
-               "and of the NFR class \u2014 and the closer centroid determines its label (Eq. 1\u20132). This replaces a "
-               "prior version of this chart that compared requirements to each other using TF-IDF text similarity, "
-               "which was not part of the described framework.")
+               "and of the NFR class, both learned from the labelled DS1 calibration set \u2014 and the closer "
+               "centroid determines its label (Eq. 1\u20132). These are the same similarities that produced the "
+               "FR/NFR column above.")
 
-    centroid_fr = topic_dist[(reqs["fr_nfr"] == "FR").values].mean(axis=0)
-    centroid_nfr = topic_dist[(reqs["fr_nfr"] == "NFR").values].mean(axis=0)
-    n_fr = int((reqs["fr_nfr"] == "FR").sum())
-    n_nfr = int((reqs["fr_nfr"] == "NFR").sum())
+    sim_fr_vals = reqs["sim_FR"].to_numpy(dtype=float)
+    sim_nfr_vals = reqs["sim_NFR"].to_numpy(dtype=float)
 
-    if n_fr == 0 or n_nfr == 0:
-        st.warning(f"Only one class is present in this dataset's current classification (FR: {n_fr}, NFR: {n_nfr}), "
-                   "so an NFR (or FR) centroid can't be computed \u2014 there's nothing to average. This happens when "
-                   "the classifier (ground truth for DS1, or the keyword heuristic for DS3/DS4) doesn't detect any "
-                   "member of one class in this particular dataset. The FR/NFR centroid comparison isn't meaningful "
-                   "here until both classes have at least one member.")
-    else:
-        def _cos(a, b):
-            denom = (np.linalg.norm(a) * np.linalg.norm(b))
-            return float(np.dot(a, b) / denom) if denom > 0 else 0.0
+    plot_src = reqs.head(30) if LARGE else reqs
+    plot_idx = list(range(len(plot_src)))
+    plot_df = pd.DataFrame({
+        "req_id": plot_src["req_id"].values,
+        "sim_FR": sim_fr_vals[plot_idx],
+        "sim_NFR": sim_nfr_vals[plot_idx],
+        "fr_nfr": plot_src["fr_nfr"].values,
+    })
 
-        sim_fr_vals = np.array([_cos(topic_dist[i], centroid_fr) for i in range(len(reqs))])
-        sim_nfr_vals = np.array([_cos(topic_dist[i], centroid_nfr) for i in range(len(reqs))])
-        reqs["sim_FR"] = sim_fr_vals
-        reqs["sim_NFR"] = sim_nfr_vals
+    heat_matrix = plot_df[["sim_FR", "sim_NFR"]].T
+    heat_matrix.index = ["sim to FR centroid", "sim to NFR centroid"]
+    heat_matrix.columns = plot_df["req_id"].values
 
-        plot_src = reqs.head(30) if LARGE else reqs
-        plot_idx = list(range(len(plot_src)))
-        plot_df = pd.DataFrame({
-            "req_id": plot_src["req_id"].values,
-            "sim_FR": sim_fr_vals[plot_idx],
-            "sim_NFR": sim_nfr_vals[plot_idx],
-            "fr_nfr": plot_src["fr_nfr"].values,
-        })
-
-        heat_matrix = plot_df[["sim_FR", "sim_NFR"]].T
-        heat_matrix.index = ["sim to FR centroid", "sim to NFR centroid"]
-        heat_matrix.columns = plot_df["req_id"].values
-
-        fig_sim = px.imshow(
-            heat_matrix, color_continuous_scale="Oranges", aspect="auto",
-            labels=dict(color="cosine similarity"),
-            title=f"Similarity to FR vs. NFR Centroid{' (first 30 shown)' if LARGE else ''}",
-            zmin=0, zmax=1,
-        )
-        fig_sim.update_xaxes(side="bottom", tickangle=-60)
-        fig_sim.update_layout(height=420)
-        st.plotly_chart(fig_sim, use_container_width=True)
-        st.caption("Each column is a requirement; the two rows show its cosine similarity to the FR centroid and "
-                   "to the NFR centroid. A requirement is classified by whichever row is darker (higher similarity) "
-                   "for that column \u2014 columns where both rows look similarly shaded are ambiguous cases, close to "
-                   "both classes.")
+    fig_sim = px.imshow(
+        heat_matrix, color_continuous_scale="Oranges", aspect="auto",
+        labels=dict(color="cosine similarity"),
+        title=f"Similarity to FR vs. NFR Centroid{' (first 30 shown)' if LARGE else ''}",
+        zmin=0, zmax=1,
+    )
+    fig_sim.update_xaxes(side="bottom", tickangle=-60)
+    fig_sim.update_layout(height=420)
+    st.plotly_chart(fig_sim, use_container_width=True)
+    st.caption("Each column is a requirement; the two rows show its cosine similarity to the FR centroid and "
+               "to the NFR centroid. A requirement is classified by whichever row is darker (higher similarity) "
+               "for that column \u2014 columns where both rows look similarly shaded are ambiguous cases, close to "
+               "both classes.")
 
     st.subheader("4. ourRank Scoring (Topic-Weighted Ranking)")
     if UPLOAD_MODE:
@@ -925,7 +1003,7 @@ elif page == "Phase 1 \u2014 Requirement Prioritization":
         + w_change * normalize(reqs["change_frequency"])
         + w_defects * normalize(reqs["historical_defects"])
     )
-    reqs["ourRank"] = reqs["score"].rank(ascending=False).astype(int)
+    reqs["ourRank"] = reqs["score"].round(6).rank(ascending=False, method="min").astype(int)
     ranked = reqs.sort_values("score", ascending=False)
 
     st.dataframe(
