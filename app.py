@@ -548,7 +548,7 @@ def prepare_uploaded_tests(df, reqs):
     out["tc_id"] = (df[id_col].astype(str).str.strip() if id_col is not None and id_col != text_col
                     else [f"TC-{i+1:02d}" for i in range(len(df))])
     out = out[out["description"].str.len() > 0].reset_index(drop=True)
-    link_vals = (df[link_col].astype(str).str.strip().reset_index(drop=True)
+    link_vals = (df[link_col].fillna("").astype(str).str.strip().reset_index(drop=True)
                  if link_col is not None else pd.Series([""] * len(out)))
 
     vec = TfidfVectorizer(stop_words="english")
@@ -557,7 +557,7 @@ def prepare_uploaded_tests(df, reqs):
     req_ids = reqs["req_id"].tolist()
     linked, scores, methods = [], [], []
     for i in range(len(out)):
-        given = link_vals.iloc[i] if i < len(link_vals) else ""
+        given = str(link_vals.iloc[i]) if i < len(link_vals) and pd.notna(link_vals.iloc[i]) else ""
         if given and given.lower() != "nan" and given in req_ids:
             j = req_ids.index(given)
             linked.append(given); scores.append(float(sim[i, j])); methods.append("Given in file")
@@ -1096,10 +1096,12 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
 
         # --- Real redundancy detection: pairwise cosine similarity on descriptions,
         # greedily keep the higher-priority test case and drop near-duplicate lower-priority ones ---
-        REDUNDANCY_THRESHOLD = 0.30
+        # A test case is redundant only if another, already-kept test case verifies the SAME requirement
+        # with near-identical wording, so removing it never reduces requirement coverage.
+        REDUNDANCY_THRESHOLD = 0.50
         req_rank_lookup_early = dict(zip(ranked["req_id"], ranked["ourRank"]))
         priority_selected["req_rank"] = priority_selected["linked_req_id"].map(req_rank_lookup_early)
-        priority_selected = priority_selected.sort_values("req_rank").reset_index(drop=True)
+        priority_selected = priority_selected.sort_values("req_rank", kind="stable").reset_index(drop=True)
 
         redundant_rows = []
         kept_idx = []
@@ -1112,6 +1114,8 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
             for i in range(len(priority_selected)):
                 best_j, best_score = None, 0.0
                 for j in kept_idx:
+                    if priority_selected.iloc[j]["linked_req_id"] != priority_selected.iloc[i]["linked_req_id"]:
+                        continue
                     if sim_redund[i, j] > best_score:
                         best_j, best_score = j, sim_redund[i, j]
                 if best_j is not None and best_score > REDUNDANCY_THRESHOLD:
@@ -1119,7 +1123,8 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
                         "tc_id": priority_selected.iloc[i]["tc_id"],
                         "description": priority_selected.iloc[i]["description"],
                         "linked_req_id": priority_selected.iloc[i]["linked_req_id"],
-                        "Reason excluded": (f"Redundant with {priority_selected.iloc[best_j]['tc_id']} "
+                        "Reason excluded": (f"Redundant with {priority_selected.iloc[best_j]['tc_id']}, which verifies "
+                                            f"the same requirement {priority_selected.iloc[i]['linked_req_id']} "
                                              f"(cosine similarity {best_score:.2f} > {REDUNDANCY_THRESHOLD}) \u2014 "
                                              f"{priority_selected.iloc[best_j]['tc_id']} kept as the higher-priority test case"),
                     })
@@ -1170,14 +1175,14 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
                         use_container_width=True, hide_index=True,
                     )
                 if len(redundant_df) > 0:
-                    st.write(f"**Excluded as redundant** ({len(redundant_df)}) \u2014 cosine similarity to an already-kept test case exceeded {REDUNDANCY_THRESHOLD}")
+                    st.write(f"**Excluded as redundant** ({len(redundant_df)}) \u2014 cosine similarity above {REDUNDANCY_THRESHOLD} to an already-kept test case of the same requirement")
                     st.dataframe(
                         redundant_df[["tc_id", "description", "linked_req_id", "Reason excluded"]]
                         .rename(columns={"tc_id": "Test Case", "description": "Description", "linked_req_id": "Linked requirement"}),
                         use_container_width=True, hide_index=True,
                     )
                 st.caption("Two independent exclusion mechanisms run here: a priority cutoff (requirement rank vs. "
-                           "the slider above) and a genuine redundancy check (pairwise cosine similarity between "
+                           "the slider above) and a genuine redundancy check (pairwise cosine similarity between test cases of the same requirement, using their "
                            "test case descriptions, computed live \u2014 the same technique used elsewhere in this "
                            "pipeline). Whichever applies to a given test case is stated explicitly above.")
         else:
