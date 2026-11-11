@@ -388,7 +388,43 @@ TEXT_COL_CANDIDATES = ["requirement_text", "requirement", "requirements", "text"
 ID_COL_CANDIDATES = ["req_id", "id", "requirement_id", "reqid", "no", "number"]
 TC_TEXT_CANDIDATES = ["description", "test_case", "testcase", "test case", "test_description", "steps", "title", "name", "text"]
 TC_ID_CANDIDATES = ["tc_id", "test_id", "testcase_id", "test_case_id", "id"]
-TC_LINK_CANDIDATES = ["linked_req_id", "req_id", "requirement_id", "linked_requirement", "requirement"]
+TC_LINK_CANDIDATES = ["linked_req_id", "linked_req_ids", "req_id", "requirement_id", "linked_requirement",
+                      "requirements_covered", "requirement"]
+TC_OBLIGATION_CANDIDATES = ["obligation", "obligations", "verification_obligation"]
+TC_FAULT_CANDIDATES = ["detected_fault", "fault_detected", "fault", "faults", "failed"]
+
+
+OBLIGATION_TITLE_THRESHOLD = 0.5
+_FAILURE_WORDS = (r"\b(fail|fails|failed|failure|invalid|incorrect|wrong|unauthori[sz]ed|declined|reject|rejected|"
+                  r"denied|deny|error|blocked|locked|lockout|cannot|can't|not|without permission)\b|\bnon-(registered|authori[sz]ed|epcs)\b")
+_BOUNDARY_WORDS = (r"\d|\b(within|under|over|limit|limits|maximum|minimum|max|min|threshold|timeout|concurrent|"
+                   r"seconds?|minutes?|boundary|exceed|exceeds)\b")
+
+
+def obligation_kind(text):
+    """Kind of verification obligation a test case exercises: failure path, boundary, or nominal behaviour."""
+    import re
+    t = test_title(text).lower()
+    if re.search(_FAILURE_WORDS, t):
+        return "failure"
+    if re.search(_BOUNDARY_WORDS, t):
+        return "boundary"
+    return "nominal"
+
+
+def test_title(text):
+    """The test's own name: text before 'Preconditions' or a '(section)' reference, without 'Test case:'."""
+    import re
+    s = re.split(r"\bPre-?conditions?\b|\(\d", str(text), maxsplit=1, flags=re.I)[0]
+    return re.sub(r"^\s*test\s*case\s*:\s*", "", s, flags=re.I).strip() or str(text)
+
+
+def split_req_ids(value):
+    """A test case may verify several requirements: 'R1;R2', 'R1, R2' or 'R1|R2'."""
+    import re
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return []
+    return [x.strip() for x in re.split(r"[;,|]", str(value)) if x.strip() and x.strip().lower() != "nan"]
 
 SAMPLE_REQ_CSV = (
     "req_id,requirement_text\n"
@@ -548,6 +584,8 @@ def prepare_uploaded_tests(df, reqs):
     out["tc_id"] = (df[id_col].astype(str).str.strip() if id_col is not None and id_col != text_col
                     else [f"TC-{i+1:02d}" for i in range(len(df))])
     out = out[out["description"].str.len() > 0].reset_index(drop=True)
+    obl_col = _pick_col(df, TC_OBLIGATION_CANDIDATES)
+    fault_col = _pick_col(df, TC_FAULT_CANDIDATES)
     link_vals = (df[link_col].fillna("").astype(str).str.strip().reset_index(drop=True)
                  if link_col is not None else pd.Series([""] * len(out)))
 
@@ -558,9 +596,10 @@ def prepare_uploaded_tests(df, reqs):
     linked, scores, methods = [], [], []
     for i in range(len(out)):
         given = str(link_vals.iloc[i]) if i < len(link_vals) and pd.notna(link_vals.iloc[i]) else ""
-        if given and given.lower() != "nan" and given in req_ids:
-            j = req_ids.index(given)
-            linked.append(given); scores.append(float(sim[i, j])); methods.append("Given in file")
+        given_ids = [g for g in split_req_ids(given) if g in req_ids]
+        if given_ids:
+            j = req_ids.index(given_ids[0])
+            linked.append(";".join(given_ids)); scores.append(float(sim[i, j])); methods.append("Given in file")
         else:
             j = int(sim[i].argmax()) if len(req_ids) else 0
             if len(req_ids) and sim[i, j] >= ALIGN_THRESHOLD:
@@ -571,7 +610,13 @@ def prepare_uploaded_tests(df, reqs):
     out["linked_req_id"] = linked
     out["alignment_score"] = scores
     out["alignment_method"] = methods
-    return out[["tc_id", "description", "linked_req_id", "alignment_score", "alignment_method"]]
+    out["obligation"] = (df[obl_col].fillna("").astype(str).str.strip().reset_index(drop=True)
+                         if obl_col is not None else "")
+    out["detected_fault"] = (df[fault_col].astype(str).str.strip().str.lower()
+                             .isin(["1", "true", "yes", "y", "x", "fault", "failed"]).reset_index(drop=True)
+                             if fault_col is not None else False)
+    return out[["tc_id", "description", "linked_req_id", "alignment_score", "alignment_method",
+                "obligation", "detected_fault"]]
 
 
 # --------------------------------------------------------------------------
@@ -1068,7 +1113,9 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
     else:
         ranked = st.session_state["ranked_reqs"]
 
-        testable_ids = set(tcs_raw["linked_req_id"].unique())
+        tcs_raw = tcs_raw.copy()
+        tcs_raw["covers"] = tcs_raw["linked_req_id"].map(split_req_ids)
+        testable_ids = {r for lst in tcs_raw["covers"] for r in lst}
         ranked_testable = ranked[ranked["req_id"].isin(testable_ids)].copy()
 
         if len(ranked_testable) < len(ranked):
@@ -1092,75 +1139,105 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
         st.write("Selected requirements:", ", ".join(top_reqs))
 
         st.subheader("2. Requirement-Test Mapping + Greedy Heuristic TC Selection")
-        priority_selected = tcs_raw[tcs_raw["linked_req_id"].isin(top_reqs)].copy()
+        req_rank_lookup = dict(zip(ranked["req_id"], ranked["ourRank"]))
+        top_set = set(top_reqs)
+        tcs_raw["in_scope"] = tcs_raw["covers"].map(lambda lst: [r for r in lst if r in top_set])
+        tcs_raw["best_rank"] = tcs_raw["in_scope"].map(
+            lambda lst: min((req_rank_lookup.get(r, 10**6) for r in lst), default=10**6))
+        candidates = tcs_raw[tcs_raw["in_scope"].map(len) > 0].reset_index(drop=True)
+        candidates["file_pos"] = range(len(candidates))
 
-        # --- Real redundancy detection: pairwise cosine similarity on descriptions,
-        # greedily keep the higher-priority test case and drop near-duplicate lower-priority ones ---
-        # A test case is redundant only if another, already-kept test case verifies the SAME requirement
-        # with near-identical wording, so removing it never reduces requirement coverage.
-        REDUNDANCY_THRESHOLD = 0.50
-        req_rank_lookup_early = dict(zip(ranked["req_id"], ranked["ourRank"]))
-        priority_selected["req_rank"] = priority_selected["linked_req_id"].map(req_rank_lookup_early)
-        priority_selected = priority_selected.sort_values("req_rank", kind="stable").reset_index(drop=True)
+        # --- Verification obligations (manuscript Section 3.2.1) ---------------------------------
+        # Each requirement r has obligations: one nominal path, one per boundary/threshold and one per
+        # failure path. A test case exercises (r, obligation) for every in-scope requirement it traces to.
+        # The obligation label comes from the file's `obligation` column when given (manual annotation);
+        # otherwise it is derived: the kind (nominal / boundary / failure) from the test wording, and tests
+        # of the same requirement and kind whose titles are near-identical (cosine > 0.5) share one obligation.
+        candidates["kind"] = candidates["description"].map(obligation_kind)
+        candidates["title"] = candidates["description"].map(test_title)
+        manual = candidates["obligation"].astype(str).str.strip() != "" if "obligation" in candidates.columns \
+            else pd.Series(False, index=candidates.index)
+        title_sim = (cosine_similarity(TfidfVectorizer(stop_words="english").fit_transform(candidates["title"]))
+                     if len(candidates) >= 2 else np.ones((len(candidates), len(candidates))))
+        obligations = {i: set() for i in candidates.index}
+        for r in top_reqs:
+            idx = [i for i in candidates.sort_values(["best_rank", "file_pos"]).index if r in candidates.at[i, "in_scope"]]
+            groups = []  # (kind, representative index)
+            for i in idx:
+                if manual.iloc[i]:
+                    obligations[i].add((r, candidates.at[i, "obligation"]))
+                    continue
+                kind = candidates.at[i, "kind"]
+                g = next((gi for gi, (k, rep_i) in enumerate(groups)
+                          if k == kind and title_sim[i, rep_i] > OBLIGATION_TITLE_THRESHOLD), None)
+                if g is None:
+                    groups.append((kind, i)); g = len(groups) - 1
+                obligations[i].add((r, f"{kind} #{sum(1 for k, _ in groups[:g + 1] if k == kind)}"))
+
+        # --- Deterministic greedy heuristic over obligations --------------------------------------
+        uncovered = set().union(*obligations.values()) if obligations else set()
+        chosen, covered_by = [], {}
+        while uncovered:
+            gain = {i: len(obligations[i] & uncovered) for i in candidates.index if i not in chosen}
+            best = max(gain.values(), default=0)
+            if best == 0:
+                break
+            pick = min((i for i, g in gain.items() if g == best),
+                       key=lambda i: (candidates.at[i, "best_rank"], candidates.at[i, "file_pos"]))
+            chosen.append(pick)
+            for ob in obligations[pick] & uncovered:
+                covered_by[ob] = candidates.at[pick, "tc_id"]
+            uncovered -= obligations[pick]
 
         redundant_rows = []
-        kept_idx = []
-        if len(priority_selected) >= 2:
-            vec_redund = TfidfVectorizer(stop_words="english")
-            redund_src = (priority_selected["redundancy_text"] if "redundancy_text" in priority_selected.columns
-                          else priority_selected["description"])
-            X_redund = vec_redund.fit_transform(redund_src)
-            sim_redund = cosine_similarity(X_redund)
-            for i in range(len(priority_selected)):
-                best_j, best_score = None, 0.0
-                for j in kept_idx:
-                    if priority_selected.iloc[j]["linked_req_id"] != priority_selected.iloc[i]["linked_req_id"]:
-                        continue
-                    if sim_redund[i, j] > best_score:
-                        best_j, best_score = j, sim_redund[i, j]
-                if best_j is not None and best_score > REDUNDANCY_THRESHOLD:
-                    redundant_rows.append({
-                        "tc_id": priority_selected.iloc[i]["tc_id"],
-                        "description": priority_selected.iloc[i]["description"],
-                        "linked_req_id": priority_selected.iloc[i]["linked_req_id"],
-                        "Reason excluded": (f"Redundant with {priority_selected.iloc[best_j]['tc_id']}, which verifies "
-                                            f"the same requirement {priority_selected.iloc[i]['linked_req_id']} "
-                                             f"(cosine similarity {best_score:.2f} > {REDUNDANCY_THRESHOLD}) \u2014 "
-                                             f"{priority_selected.iloc[best_j]['tc_id']} kept as the higher-priority test case"),
-                    })
-                else:
-                    kept_idx.append(i)
-        else:
-            kept_idx = list(range(len(priority_selected)))
+        for i in candidates.index:
+            if i in chosen:
+                continue
+            by = sorted({covered_by[ob] for ob in obligations[i] if ob in covered_by})
+            obl_txt = "; ".join(f"{r} {o}" for r, o in sorted(obligations[i]))
+            redundant_rows.append({
+                "tc_id": candidates.at[i, "tc_id"], "description": candidates.at[i, "description"],
+                "linked_req_id": candidates.at[i, "linked_req_id"],
+                "Reason excluded": f"Redundant: every obligation it checks ({obl_txt}) is already checked by "
+                                   f"{', '.join(by)}",
+            })
 
-        selected = (priority_selected.iloc[kept_idx]
-                    .drop(columns=["req_rank", "redundancy_text"], errors="ignore").reset_index(drop=True))
-        st.dataframe(selected, use_container_width=True, hide_index=True)
-        st.caption(f"{len(selected)} test cases selected out of {len(tcs_raw)} total in the pool "
-                   f"(redundant/irrelevant cases excluded by construction).")
+        def _primary(lst):
+            return min(lst, key=lambda r: req_rank_lookup.get(r, 10**6))
+
+        selected = candidates.loc[chosen].copy()
+        selected["covers"] = selected["in_scope"].map(lambda lst: ";".join(lst))
+        selected["linked_req_id"] = selected["in_scope"].map(_primary)
+        selected["obligations"] = [ "; ".join(f"{r} {o}" for r, o in sorted(obligations[i])) for i in chosen]
+        selected = selected.reset_index(drop=True)
+        show_cols = ["tc_id", "description", "covers", "obligations"]
+        st.dataframe(selected[show_cols].rename(columns={"covers": "requirements verified (in scope)"}),
+                     use_container_width=True, hide_index=True)
+        st.caption(f"{len(selected)} test cases selected out of {len(tcs_raw)} total in the pool. Greedy heuristic: "
+                   "at each step the test case checking the most still-unchecked verification obligations is "
+                   "selected (ties \u2192 highest-ranked requirement), so every obligation of every in-scope "
+                   "requirement stays covered.")
 
         fig_funnel = go.Figure(go.Funnel(
-            y=["Total Test Case Pool", "Requirement-Relevant Candidates", "Final Prioritized Sequence (redundancy removed)"],
-            x=[len(tcs_raw), len(priority_selected), len(selected)],
+            y=["Total Test Case Pool", "Requirement-Relevant Candidates", "Final Selected Suite (redundancy removed)"],
+            x=[len(tcs_raw), len(candidates), len(selected)],
             marker={"color": [BRAND[2], BRAND[1], BRAND[0]]},
         ))
         fig_funnel.update_layout(title="Test Case Pool Reduction", height=320)
         st.plotly_chart(fig_funnel, use_container_width=True)
 
-        priority_excluded = tcs_raw[~tcs_raw["tc_id"].isin(priority_selected["tc_id"])].copy()
-        req_rank_lookup = dict(zip(ranked["req_id"], ranked["ourRank"]))
+        priority_excluded = tcs_raw[tcs_raw["in_scope"].map(len) == 0].copy()
         total_ranked = len(ranked)
         if len(priority_excluded) > 0:
-            priority_excluded["Requirement rank"] = priority_excluded["linked_req_id"].map(req_rank_lookup)
-            priority_excluded["Reason excluded"] = priority_excluded.apply(
-                lambda r: (f"Linked requirement {r['linked_req_id']} ranked #{int(r['Requirement rank'])} "
-                           f"of {total_ranked} \u2014 below the top-{top_n} cutoff")
-                if pd.notna(r["Requirement rank"])
-                else ("No requirement matched this test case (text similarity too low) \u2014 not aligned"
-                      if r["linked_req_id"] == "UNALIGNED"
-                      else f"Linked requirement {r['linked_req_id']} has no test cases in this dataset's testable set"),
-                axis=1,
-            )
+            def _irrelevant_reason(r):
+                if r["linked_req_id"] == "UNALIGNED" or not r["covers"]:
+                    return "No requirement matched this test case (text similarity too low) \u2014 not aligned"
+                ranks = [req_rank_lookup[x] for x in r["covers"] if x in req_rank_lookup]
+                if ranks:
+                    return (f"Verifies {', '.join(r['covers'])} \u2014 best rank #{min(ranks)} of {total_ranked}, "
+                            f"below the top-{top_n} cutoff")
+                return f"Linked requirement(s) {', '.join(r['covers'])} not in this dataset's testable set"
+            priority_excluded["Reason excluded"] = priority_excluded.apply(_irrelevant_reason, axis=1)
 
         redundant_df = pd.DataFrame(redundant_rows)
         total_excluded = len(priority_excluded) + len(redundant_df)
@@ -1168,26 +1245,27 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
         if total_excluded > 0:
             with st.expander(f"\U0001F6AB {total_excluded} test case(s) excluded from the pool \u2014 click to see which, and why", expanded=True):
                 if len(priority_excluded) > 0:
-                    st.write(f"**Excluded by priority cutoff** ({len(priority_excluded)})")
+                    st.write(f"**Excluded as irrelevant** ({len(priority_excluded)}) \u2014 none of the requirements they verify is in the top-{top_n}")
                     st.dataframe(
                         priority_excluded[["tc_id", "description", "linked_req_id", "Reason excluded"]]
-                        .rename(columns={"tc_id": "Test Case", "description": "Description", "linked_req_id": "Linked requirement"}),
+                        .rename(columns={"tc_id": "Test Case", "description": "Description", "linked_req_id": "Linked requirement(s)"}),
                         use_container_width=True, hide_index=True,
                     )
                 if len(redundant_df) > 0:
-                    st.write(f"**Excluded as redundant** ({len(redundant_df)}) \u2014 cosine similarity above {REDUNDANCY_THRESHOLD} to an already-kept test case of the same requirement")
+                    st.write(f"**Excluded as redundant** ({len(redundant_df)}) \u2014 every verification obligation they check is already checked by a selected test case")
                     st.dataframe(
                         redundant_df[["tc_id", "description", "linked_req_id", "Reason excluded"]]
-                        .rename(columns={"tc_id": "Test Case", "description": "Description", "linked_req_id": "Linked requirement"}),
+                        .rename(columns={"tc_id": "Test Case", "description": "Description", "linked_req_id": "Linked requirement(s)"}),
                         use_container_width=True, hide_index=True,
                     )
-                st.caption("Two independent exclusion mechanisms run here: a priority cutoff (requirement rank vs. "
-                           "the slider above) and a genuine redundancy check (pairwise cosine similarity between test cases of the same requirement, using their "
-                           "test case descriptions, computed live \u2014 the same technique used elsewhere in this "
-                           "pipeline). Whichever applies to a given test case is stated explicitly above.")
+                st.caption("Obligations: one nominal path, one per boundary/threshold and one per failure path of each "
+                           "requirement. Taken from the file's `obligation` column when given; otherwise derived from "
+                           "the test wording (failure words such as 'fails', 'invalid', 'non-registered'; boundary words "
+                           "such as numbers, 'within', 'concurrent'), with near-identical titles (cosine > "
+                           f"{OBLIGATION_TITLE_THRESHOLD}) of the same requirement and kind counted as one obligation.")
         else:
             st.success("No test cases excluded \u2014 every requirement in the pool is covered at the current cutoff, "
-                       "and no redundant test cases were found.")
+                       "and every test case checks at least one obligation no other test case checks.")
 
         st.subheader("3. Requirement\u2013Test Traceability Matrix")
         st.caption("Explicit traceability between each selected requirement and its mapped test case(s), "
@@ -1196,8 +1274,9 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
         trace_tcs = selected["tc_id"].tolist()
         trace_matrix = pd.DataFrame(0, index=trace_reqs, columns=trace_tcs)
         for _, row in selected.iterrows():
-            if row["linked_req_id"] in trace_matrix.index:
-                trace_matrix.loc[row["linked_req_id"], row["tc_id"]] = 1
+            for r in split_req_ids(row["covers"]):
+                if r in trace_matrix.index:
+                    trace_matrix.loc[r, row["tc_id"]] = 1
         trace_display = trace_matrix.replace({1: "\u2713", 0: ""})
         st.dataframe(
             trace_display.style.apply(
@@ -1330,18 +1409,28 @@ elif page == "Evaluation \u2014 APFD":
         st.write("Mark which test cases (in this run) actually detected a fault:")
 
         all_tc_ids = final_order["tc_id"].tolist()
-        fault_ids = st.multiselect("Test cases with detected faults", all_tc_ids,
-                                    default=all_tc_ids[:min(3, len(all_tc_ids))])
+        file_faults = (final_order.loc[final_order["detected_fault"].astype(bool), "tc_id"].tolist()
+                       if "detected_fault" in final_order.columns else [])
+        fault_ids = st.multiselect("Test cases with detected faults", all_tc_ids, default=file_faults)
+        if file_faults:
+            st.caption(f"{len(file_faults)} fault-detecting test case(s) taken from the `detected_fault` column of "
+                       "your test case file.")
+        else:
+            st.info("No fault data yet. Mark the test cases that actually detected a fault when executed (or add a "
+                    "`detected_fault` column with 1/0 to your test case file). APFD is only meaningful with real "
+                    "fault data: faults must not be chosen from the proposed order itself.")
 
         order = final_order["tc_id"].tolist()
         score = apfd(order, fault_ids)
 
         random_order = final_order["tc_id"].sample(frac=1, random_state=1).tolist()
-        random_score = apfd(random_order, fault_ids)
+        _rng = np.random.default_rng(1)
+        random_score = (float(np.mean([apfd(list(_rng.permutation(order)), fault_ids) for _ in range(100)]))
+                        if fault_ids else 0.0)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("APFD \u2014 Proposed order", f"{score:.3f}")
-        c2.metric("APFD \u2014 Random order", f"{random_score:.3f}", delta=f"{score - random_score:+.3f}")
+        c2.metric("APFD \u2014 Random order (mean of 100)", f"{random_score:.3f}", delta=f"{score - random_score:+.3f}")
         c3.write(
             "APFD (Average Percentage of Faults Detected) measures how early, on average, "
             "faults are found in this execution order. Higher = faults found earlier."
