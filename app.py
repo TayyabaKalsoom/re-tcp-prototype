@@ -392,6 +392,8 @@ TC_LINK_CANDIDATES = ["linked_req_id", "linked_req_ids", "req_id", "requirement_
                       "requirements_covered", "requirement"]
 TC_OBLIGATION_CANDIDATES = ["obligation", "obligations", "verification_obligation"]
 TC_FAULT_CANDIDATES = ["detected_fault", "fault_detected", "fault", "faults", "failed"]
+TC_PAST_FAIL_CANDIDATES = ["past_failures", "historical_failures", "failure_count", "past_fails"]
+TC_COVERAGE_CANDIDATES = ["lines_covered", "code_coverage", "coverage", "statements_covered"]
 
 
 OBLIGATION_TITLE_THRESHOLD = 0.5
@@ -622,8 +624,16 @@ def prepare_uploaded_tests(df, reqs):
     out["detected_fault"] = (df[fault_col].astype(str).str.strip().str.lower()
                              .isin(["1", "true", "yes", "y", "x", "fault", "failed"]).reset_index(drop=True)
                              if fault_col is not None else False)
-    return out[["tc_id", "description", "linked_req_id", "alignment_score", "alignment_method",
-                "obligation", "detected_fault"]]
+    cols = ["tc_id", "description", "linked_req_id", "alignment_score", "alignment_method",
+            "obligation", "detected_fault"]
+    # Optional test-level regression history: past failures of each test and the amount of code it executes,
+    # both measured on earlier runs (available before the new version is tested).
+    for name, cands in [("past_failures", TC_PAST_FAIL_CANDIDATES), ("lines_covered", TC_COVERAGE_CANDIDATES)]:
+        col = _pick_col(df, cands)
+        if col is not None:
+            out[name] = pd.to_numeric(df[col], errors="coerce").fillna(0).reset_index(drop=True)
+            cols.append(name)
+    return out[cols]
 
 
 # --------------------------------------------------------------------------
@@ -1330,6 +1340,10 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
                        "level by ourRank of the requirement, then by K-Medoids cluster. Coverage step: a test "
                        "case that verifies a requirement not yet verified runs before test cases that only "
                        "re-verify requirements already covered.")
+            if {"past_failures", "lines_covered"} <= set(selected.columns):
+                st.caption("Test-level regression history found (past_failures, lines_covered): before the coverage "
+                           "step, test cases are ranked by 0.4 \u00d7 requirement-driven position + 0.3 \u00d7 past "
+                           "failures + 0.3 \u00d7 code executed.")
             req_rank_map = dict(zip(ranked["req_id"], ranked["ourRank"]))
             selected["req_rank"] = selected["linked_req_id"].map(req_rank_map)
             req_info = ranked.set_index("req_id")
@@ -1349,6 +1363,20 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
             # Coverage step (paper Section 3.2.3): walking the tiered order, a test case that verifies at least
             # one requirement not yet verified runs first; test cases that only re-verify requirements are
             # deferred until every requirement has been verified once, then run in the same order.
+            hist_cols = [c for c in ("past_failures", "lines_covered") if c in tiered.columns]
+            use_history = len(hist_cols) == 2
+            if use_history:
+                # Test-level regression history (optional columns): score = 0.4 x requirement-driven position
+                # + 0.3 x past failures + 0.3 x code executed, each scaled to 0..1; the coverage step below
+                # is then applied to this order, so every requirement is still verified as early as possible.
+                def _scale(v):
+                    v = v.astype(float); rng_ = v.max() - v.min()
+                    return (v - v.min()) / rng_ if rng_ > 0 else v * 0
+                n_t = len(tiered)
+                tiered["req_driven_score"] = 1 - np.arange(n_t) / max(n_t, 1)
+                tiered["tps"] = (0.4 * tiered["req_driven_score"] + 0.3 * _scale(tiered["past_failures"])
+                                 + 0.3 * _scale(tiered["lines_covered"]))
+                tiered = tiered.sort_values("tps", ascending=False, kind="stable").reset_index(drop=True)
             verified, first_pass, deferred = set(), [], []
             for i, lst in enumerate(tiered["covers"].map(lambda s: set(split_req_ids(s) or []))):
                 if lst - verified:
