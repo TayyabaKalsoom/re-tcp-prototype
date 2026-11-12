@@ -594,12 +594,19 @@ def prepare_uploaded_tests(df, reqs):
     sim = cosine_similarity(vec.transform(out["description"]), vec.transform(reqs["requirement_text"]))
     req_ids = reqs["req_id"].tolist()
     linked, scores, methods = [], [], []
+    file_has_links = bool((link_vals.map(lambda v: bool(split_req_ids(v))) if len(link_vals) else pd.Series([], dtype=bool)).any())
     for i in range(len(out)):
         given = str(link_vals.iloc[i]) if i < len(link_vals) and pd.notna(link_vals.iloc[i]) else ""
         given_ids = [g for g in split_req_ids(given) if g in req_ids]
         if given_ids:
             j = req_ids.index(given_ids[0])
             linked.append(";".join(given_ids)); scores.append(float(sim[i, j])); methods.append("Given in file")
+        elif file_has_links:
+            # The file gives traceability links: a blank link means the test verifies no listed requirement
+            # (e.g. framework or infrastructure tests), so it is not auto-aligned and is dropped as irrelevant.
+            j = int(sim[i].argmax()) if len(req_ids) else 0
+            linked.append("UNALIGNED"); scores.append(float(sim[i, j]) if len(req_ids) else 0.0)
+            methods.append("Not linked in file")
         else:
             j = int(sim[i].argmax()) if len(req_ids) else 0
             if len(req_ids) and sim[i, j] >= ALIGN_THRESHOLD:
@@ -1318,21 +1325,45 @@ elif page == "Phase 2 \u2014 Test Case Selection & Prioritization":
                 st.plotly_chart(fig_tree, use_container_width=True)
 
             st.subheader("5. Rank TC \u2014 Final Prioritized Sequence")
+            st.caption("Order: High-criticality test cases first (they verify a requirement with a critical "
+                       "quality aspect or one in the top third of ourRank), then Medium, then Low; within each "
+                       "level by ourRank of the requirement, then by K-Medoids cluster. Coverage step: a test "
+                       "case that verifies a requirement not yet verified runs before test cases that only "
+                       "re-verify requirements already covered.")
             req_rank_map = dict(zip(ranked["req_id"], ranked["ourRank"]))
             selected["req_rank"] = selected["linked_req_id"].map(req_rank_map)
-            final_order = selected.sort_values(["req_rank", "cluster"]).reset_index(drop=True)
-            final_order["TC_sequence"] = [f"TC{i+1}" for i in range(len(final_order))]
             req_info = ranked.set_index("req_id")
+            # Aspect-based criticality: a test case is High when any requirement it verifies has a critical
+            # quality aspect (Security, Reliability, Performance, Legal/Compliance) or is in the top third of
+            # ourRank; Medium for the middle third; Low otherwise. Critical tests run first, then ourRank,
+            # then K-Medoids cluster.
+            rank_cut = max(1, int(np.ceil(len(ranked) / 3)))
+            covers_lists = selected["covers"].map(lambda s: split_req_ids(s) or [])
+            crit_aspect = covers_lists.map(lambda lst: any(req_info["aspect"].get(r) in CRITICAL_ASPECTS for r in lst))
+            selected["criticality"] = np.where(
+                crit_aspect | (selected["req_rank"] <= rank_cut), "High",
+                np.where(selected["req_rank"] <= 2 * rank_cut, "Medium", "Low"))
+            selected["_crit_order"] = selected["criticality"].map({"High": 0, "Medium": 1, "Low": 2})
+            tiered = (selected.sort_values(["_crit_order", "req_rank", "cluster"], kind="stable")
+                      .drop(columns="_crit_order").reset_index(drop=True))
+            # Coverage step (paper Section 3.2.3): walking the tiered order, a test case that verifies at least
+            # one requirement not yet verified runs first; test cases that only re-verify requirements are
+            # deferred until every requirement has been verified once, then run in the same order.
+            verified, first_pass, deferred = set(), [], []
+            for i, lst in enumerate(tiered["covers"].map(lambda s: set(split_req_ids(s) or []))):
+                if lst - verified:
+                    first_pass.append(i); verified |= lst
+                else:
+                    deferred.append(i)
+            final_order = tiered.iloc[first_pass + deferred].reset_index(drop=True)
+            final_order["coverage_step"] = ["New requirement"] * len(first_pass) + ["Re-verifies (deferred)"] * len(deferred)
+            final_order["TC_sequence"] = [f"TC{i+1}" for i in range(len(final_order))]
             final_order["fr_nfr"] = final_order["linked_req_id"].map(req_info["fr_nfr"])
             final_order["aspect"] = final_order["linked_req_id"].map(req_info["aspect"])
-            rank_cut = max(1, int(np.ceil(len(ranked) / 3)))
-            final_order["criticality"] = np.where(
-                final_order["aspect"].isin(CRITICAL_ASPECTS) | (final_order["req_rank"] <= rank_cut), "High",
-                np.where(final_order["req_rank"] <= 2 * rank_cut, "Medium", "Low"))
 
             st.dataframe(
                 final_order[["TC_sequence", "tc_id", "description", "linked_req_id", "fr_nfr", "aspect",
-                             "criticality", "cluster", "req_rank"]]
+                             "criticality", "coverage_step", "cluster", "req_rank"]]
                 .style.apply(lambda col: ["background-color:#F9D9C8; font-weight:800" if v == "High" else ""
                                           for v in col], subset=["criticality"]),
                 use_container_width=True, hide_index=True,
