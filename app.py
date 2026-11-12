@@ -353,6 +353,49 @@ def apfd(order: list, fault_ids: list) -> float:
     return 1 - (tf_sum / (n * m)) + 1 / (2 * n)
 
 
+def fault_detecting_tcs(df: pd.DataFrame):
+    """Return (sorted list of fault-detecting tc_ids, description of the format found).
+
+    Accepts any of:
+      * execution history  - columns tc_id + verdict (FAIL / FAILED / ERROR = detected),
+                             or tc_id + methods_failed (> 0 = detected)
+      * fault matrix       - tc_id + one 0/1 column per fault (any 1 = detected)
+      * faults list        - a detecting_tests column with ';'-separated tc_ids
+      * test case list     - tc_id + detected_fault (1/0)
+    """
+    cols = {c.strip().lower(): c for c in df.columns}
+    tc_col = cols.get("tc_id") or cols.get("test_id") or cols.get("test_case")
+
+    if "detecting_tests" in cols:
+        ids = set()
+        for cell in df[cols["detecting_tests"]].dropna().astype(str):
+            ids.update(t.strip() for t in cell.replace(",", ";").split(";") if t.strip())
+        return sorted(ids), "faults list (detecting_tests column)"
+
+    if tc_col is None:
+        return None, "no tc_id column found"
+
+    tc = df[tc_col].astype(str).str.strip()
+    if "verdict" in cols:
+        v = df[cols["verdict"]].astype(str).str.strip().str.upper()
+        mask = v.isin(["FAIL", "FAILED", "FAILURE", "ERROR", "KILLED", "DETECTED"])
+        return sorted(tc[mask].unique()), "execution history (verdict = FAIL)"
+    if "methods_failed" in cols:
+        mask = pd.to_numeric(df[cols["methods_failed"]], errors="coerce").fillna(0) > 0
+        return sorted(tc[mask].unique()), "execution history (methods_failed > 0)"
+    if "detected_fault" in cols:
+        mask = pd.to_numeric(df[cols["detected_fault"]], errors="coerce").fillna(0) > 0
+        return sorted(tc[mask].unique()), "detected_fault column"
+
+    fault_cols = [c for c in df.columns if c != tc_col]
+    numeric = df[fault_cols].apply(pd.to_numeric, errors="coerce")
+    fault_cols = [c for c in fault_cols if numeric[c].notna().all() and set(numeric[c].unique()) <= {0, 1}]
+    if fault_cols:
+        mask = numeric[fault_cols].sum(axis=1) > 0
+        return sorted(tc[mask].unique()), f"fault matrix ({len(fault_cols)} fault columns)"
+    return None, "no verdict, detecting_tests or 0/1 fault columns found"
+
+
 # --------------------------------------------------------------------------
 # Upload-your-own-dataset support: parsing, aspect classification,
 # default priority inputs and requirement-test alignment
@@ -1470,13 +1513,38 @@ elif page == "Evaluation \u2014 APFD":
         all_tc_ids = final_order["tc_id"].tolist()
         file_faults = (final_order.loc[final_order["detected_fault"].astype(bool), "tc_id"].tolist()
                        if "detected_fault" in final_order.columns else [])
-        fault_ids = st.multiselect("Test cases with detected faults", all_tc_ids, default=file_faults)
+        fault_source = "the `detected_fault` column of your test case file" if file_faults else ""
+
+        exec_file = st.file_uploader(
+            "Upload execution history / fault data to select fault-detecting test cases automatically",
+            type=["csv", "xlsx", "xls"], key="up_exec",
+            help="Execution history (tc_id + verdict, FAIL = detected), a fault matrix (tc_id + one 0/1 column "
+                 "per fault) or a faults list (detecting_tests column). Large files are fine.")
+        if exec_file is not None:
+            try:
+                detected, fmt = fault_detecting_tcs(read_uploaded_table(exec_file))
+            except Exception as e:  # noqa: BLE001
+                detected, fmt = None, f"could not read the file ({e})"
+            if detected is None:
+                st.error(f"Couldn't find fault data in **{exec_file.name}**: {fmt}.")
+            else:
+                in_order = [t for t in all_tc_ids if t in set(detected)]
+                missing = [t for t in detected if t not in set(all_tc_ids)]
+                file_faults = in_order
+                fault_source = f"**{exec_file.name}** — read as {fmt}"
+                if missing:
+                    shown = ", ".join(missing[:15]) + (" …" if len(missing) > 15 else "")
+                    st.warning(f"{len(missing)} fault-detecting test case(s) in the file are not in the "
+                               f"prioritized sequence (deselected or unmatched IDs) and were ignored: {shown}")
+
+        fault_ids = st.multiselect("Test cases with detected faults", all_tc_ids, default=file_faults,
+                                   key=f"fault_ids_{hash(tuple(file_faults))}")
         if file_faults:
-            st.caption(f"{len(file_faults)} fault-detecting test case(s) taken from the `detected_fault` column of "
-                       "your test case file.")
+            st.caption(f"{len(file_faults)} of {len(all_tc_ids)} test case(s) auto-selected from {fault_source}. "
+                       "You can still add or remove test cases by hand.")
         else:
-            st.info("No fault data yet. Mark the test cases that actually detected a fault when executed (or add a "
-                    "`detected_fault` column with 1/0 to your test case file). APFD is only meaningful with real "
+            st.info("No fault data yet. Upload your execution history above, mark the test cases that actually "
+                    "detected a fault by hand, or add a `detected_fault` column with 1/0 to your test case file. APFD is only meaningful with real "
                     "fault data: faults must not be chosen from the proposed order itself.")
 
         order = final_order["tc_id"].tolist()
